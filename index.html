@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="ku" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>TariffApp</title>
+
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: Arial, Tahoma, sans-serif;
+            background: #f4f6f8;
+            color: #1f2937;
+        }
+
+        header {
+            background: #123b5d;
+            color: white;
+            padding: 25px 20px;
+            text-align: center;
+        }
+
+        header h1 {
+            margin: 0 0 8px;
+            font-size: 32px;
+        }
+
+        header p {
+            margin: 0;
+            font-size: 15px;
+            opacity: 0.9;
+        }
+
+        .container {
+            width: 92%;
+            max-width: 1100px;
+            margin: 30px auto;
+        }
+
+        .search-box {
+            background: white;
+            padding: 25px;
+            border-radius: 12px;
+            box-shadow: 0 3px 12px rgba(0,0,0,0.08);
+            margin-bottom: 25px;
+        }
+
+        .search-box h2 {
+            margin-top: 0;
+            text-align: right;
+        }
+
+        #searchInput {
+            width: 100%;
+            padding: 15px;
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            font-size: 18px;
+            outline: none;
+            direction: ltr;
+            text-align: left;
+        }
+
+        #searchInput:focus {
+            border-color: #2563eb;
+        }
+
+        .hint {
+            margin-top: 10px;
+            color: #64748b;
+            font-size: 14px;
+        }
+
+        .count {
+            margin-bottom: 12px;
+            color: #64748b;
+            font-size: 14px;
+        }
+
+        #resultsContainer {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .result {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 3px 12px rgba(0,0,0,0.07);
+        }
+
+        .result-code {
+            font-size: 24px;
+            font-weight: bold;
+            color: #123b5d;
+            margin-bottom: 10px;
+            cursor: pointer;
+            direction: ltr;
+            text-align: left;
+        }
+
+        .result-description {
+            font-size: 17px;
+            margin-bottom: 15px;
+            line-height: 1.8;
+        }
+
+        .result-info {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+        }
+
+        .info-box {
+            background: #f1f5f9;
+            padding: 12px;
+            border-radius: 8px;
+        }
+
+        .info-label {
+            display: block;
+            color: #64748b;
+            font-size: 12px;
+            margin-bottom: 5px;
+        }
+
+        .info-value {
+            font-weight: bold;
+        }
+
+        .intertek-required {
+            background: #fff3cd;
+            color: #856404;
+        }
+
+        .intertek-not-required {
+            background: #e8f5e9;
+            color: #2e7d32;
+        }
+
+        .empty {
+            background: white;
+            padding: 30px;
+            text-align: center;
+            border-radius: 12px;
+            color: #64748b;
+        }
+
+        footer {
+            text-align: center;
+            padding: 30px;
+            color: #64748b;
+            font-size: 13px;
+        }
+
+        @media (max-width: 700px) {
+            .result-info {
+                grid-template-columns: 1fr;
+            }
+
+            header h1 {
+                font-size: 25px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+<header>
+    <h1>TariffApp</h1>
+    <p>سیستەمی گەڕانی تعرفە</p>
+</header>
+
+<main class="container">
+
+    <section class="search-box">
+
+        <h2>گەڕان بە کۆدی HS</h2>
+
+        <input
+            id="searchInput"
+            type="text"
+            inputmode="numeric"
+            maxlength="8"
+            placeholder="کۆدی HS بنووسە..."
+            autocomplete="off"
+        >
+
+        <div class="hint">
+            ١ تا ٨ ژمارە بنووسە؛ ئەنجامەکان بە خۆکار دەردەکەون.
+        </div>
+
+    </section>
+
+    <div id="count" class="count"></div>
+
+    <section id="resultsContainer"></section>
+
+</main>
+
+<footer>
+    TariffApp
+</footer>
+
+<script>
+
+/*
+==========================================================
+IMPORTANT
+==========================================================
+
+لە Chunk 2 ـدا هەموو tariffData ـە ڕاستەقینەکەت
+دەخەینە ناو ئەم فایلە.
+
+هیچ tariff ـێکی نموونەیی بەکارناهێنین.
+
+==========================================================
+*/
+
+const tariffData = [
