@@ -324,6 +324,38 @@ body{background:#f2f3f7;color:#17181b}
 </style>
 </head>
 <body>
+<script>
+/* Shows any script error on screen. Without this, a failure on a phone
+   is invisible: the page renders but nothing responds, which looks
+   identical to a dead button. */
+(function () {
+  function show(msg) {
+    try {
+      var bar = document.getElementById('js-error-bar');
+      if (!bar) {
+        bar = document.createElement('div');
+        bar.id = 'js-error-bar';
+        bar.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:#b42318;color:#fff;' +
+          'font:12px/1.5 -apple-system,Arial,sans-serif;padding:10px 12px;white-space:pre-wrap;' +
+          'max-height:45vh;overflow:auto;-webkit-user-select:text;user-select:text';
+        (document.body || document.documentElement).appendChild(bar);
+      }
+      bar.textContent += msg + '\n';
+    } catch (e) {}
+  }
+  window.addEventListener('error', function (e) {
+    show('ERROR: ' + (e.message || 'unknown') +
+         (e.filename ? ' @' + String(e.filename).split('/').pop() : '') +
+         (e.lineno ? ':' + e.lineno : ''));
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    var r = e.reason;
+    show('PROMISE: ' + ((r && (r.message || r)) || 'unknown'));
+  });
+  window.__diag = show;
+})();
+</script>
+
 
 <section id="loginPage" class="login-page">
   <div class="lang-switch">
@@ -28125,10 +28157,19 @@ async function restoreSession() {
 }
 
 /* Boot last: everything above must be declared before this runs. */
+function bootBackend() {
+  try {
+    wireBackend();
+    if (window.__diag) { /* nothing to report */ }
+  } catch (e) {
+    if (window.__diag) window.__diag('SETUP FAILED: ' + (e && e.message ? e.message : e));
+    throw e;
+  }
+}
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', wireBackend);
+  document.addEventListener('DOMContentLoaded', bootBackend);
 } else {
-  wireBackend();
+  bootBackend();
 }
 
 </script>
