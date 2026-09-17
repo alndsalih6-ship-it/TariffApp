@@ -25374,9 +25374,6 @@ function renderView(view) {
   }
 
   if (view === 'ai') {
-    // AI-only mobile layout fix: reset scroll when opening AI so the sticky header
-    // cannot cover the AI title/content. No other view is affected.
-    window.scrollTo({ top: 0, behavior: 'auto' });
     content.innerHTML = `<div class="ai-modern">
       <section class="ai-head">
         <div class="ai-head-left">
@@ -26860,6 +26857,1280 @@ window.deviceKind = deviceKind;
     }
   } catch (e) { /* manifest is a nice-to-have; never block the app for it */ }
 })();
+
+/* ============================================================
+   SERVER LOGIN LAYER — added without changing the UI/design.
+   This makes the same account usable from Safari on phone and
+   from the desktop by authenticating against the shared backend.
+   ============================================================ */
+/* ============================================================
+   Supabase backend connection.
+   Only the public "anon" key lives here — that is by design.
+   The real protection is the Row Level Security policies on the
+   server, which this key cannot bypass.
+   ============================================================ */
+
+const SUPA_URL = 'https://lnikyqqexjazaavaopyq.supabase.co';
+const SUPA_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxuaWt5cXFleGphemFhdmFvcHlxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkzMTM2ODUsImV4cCI6MjEwNDg4OTY4NX0.PsKdpcbvDso5Or9y_QINH8AmMDgSrTAJt_8FJBRGXcg';
+
+let authToken = null;      // set after sign-in
+let authUserId = null;
+
+/* Sends the user back to the login screen with an explanation. Defined
+   here because supa() calls it, and it must never throw. */
+function sessionExpired() {
+  try {
+    authToken = null;
+    authUserId = null;
+    store.remove('tariffapp_token');
+    store.remove('tariffapp_refresh');
+    store.remove('tariffapp_role');
+    if (typeof stopServerSessionWatch === 'function') stopServerSessionWatch();
+    if (typeof stopSessionWatch === 'function') stopSessionWatch();
+    const app = document.getElementById('app');
+    const login = document.getElementById('loginPage');
+    const pay = document.getElementById('paywallPage');
+    if (app) app.classList.add('hidden');
+    if (pay) pay.classList.add('hidden');
+    if (login) login.classList.remove('hidden');
+    const pw = document.getElementById('password');
+    if (pw) pw.value = '';
+    const msg = document.getElementById('loginMsg');
+    if (msg) {
+      msg.style.color = '#b42318';
+      msg.textContent = (typeof t === 'function') ? t('sessionExpired') : 'Your session expired. Please sign in again.';
+    }
+  } catch (e) { /* never let recovery itself fail */ }
+}
+
+function supaHeaders(extra) {
+  const h = {
+    'apikey': SUPA_KEY,
+    'Content-Type': 'application/json',
+    'Authorization': 'Bearer ' + (authToken || SUPA_KEY)
+  };
+  return Object.assign(h, extra || {});
+}
+
+/* Thin wrapper so every call has the same error shape. */
+async function supa(path, opts) {
+  /* Merge headers LAST: otherwise a caller passing its own `headers`
+     replaces the object that carries the apikey, and the request is
+     rejected with "No API key found in request". */
+  opts = opts || {};
+  const custom = opts.headers;
+  const init = Object.assign({}, opts);
+  init.headers = supaHeaders(custom);
+  let res = await fetch(SUPA_URL + path, init);
+  let text = await res.text();
+  let body = null;
+  if (text) { try { body = JSON.parse(text); } catch (e) { body = text; } }
+
+  /* A rejected request usually means the session went stale. Rather
+     than surfacing a security error the user cannot act on, get a new
+     token and try once more; if that fails, sign them out properly
+     instead of leaving the app looking signed in. */
+  const looksStale = res.status === 401 || res.status === 403 ||
+    (body && typeof body === 'object' && /row-level security|JWT|not authenticated/i.test(
+      String(body.message || body.msg || body.error || '')));
+
+  if (looksStale && !opts.__retried && path.indexOf('/auth/v1/') !== 0) {
+    const ok = await supaRefresh();
+    if (ok && authToken) {
+      const retry = Object.assign({}, opts, { __retried: true });
+      return await supa(path, retry);
+    }
+    sessionExpired();
+    const err = new Error(t('sessionExpired'));
+    err.status = res.status;
+    throw err;
+  }
+
+  if (!res.ok) {
+    const msg = (body && (body.msg || body.message || body.error_description || body.error)) || ('HTTP ' + res.status);
+    const err = new Error(msg);
+    err.status = res.status;
+    err.body = body;
+    throw err;
+  }
+  return body;
+}
+
+/* ---------- Auth ---------- */
+
+async function supaSignUp(email, password, fullName) {
+  const data = await supa('/auth/v1/signup', {
+    method: 'POST',
+    body: JSON.stringify({
+      email, password,
+      data: { full_name: fullName }
+    })
+  });
+  return data;
+}
+
+async function supaSignIn(email, password) {
+  const data = await supa('/auth/v1/token?grant_type=password', {
+    method: 'POST',
+    body: JSON.stringify({ email, password })
+  });
+  authToken = data.access_token;
+  authUserId = data.user && data.user.id;
+  store.set('tariffapp_token', authToken);
+  store.set('tariffapp_refresh', data.refresh_token || '');
+  return data;
+}
+
+async function supaRefresh() {
+  const rt = store.get('tariffapp_refresh');
+  if (!rt) return null;
+  try {
+    const data = await supa('/auth/v1/token?grant_type=refresh_token', {
+      method: 'POST',
+      body: JSON.stringify({ refresh_token: rt })
+    });
+    authToken = data.access_token;
+    authUserId = data.user && data.user.id;
+    store.set('tariffapp_token', authToken);
+    store.set('tariffapp_refresh', data.refresh_token || '');
+    return data;
+  } catch (e) {
+    store.remove('tariffapp_token');
+    store.remove('tariffapp_refresh');
+    return null;
+  }
+}
+
+async function supaSignOut() {
+  try { await supa('/auth/v1/logout', { method: 'POST' }); } catch (e) { /* token may already be dead */ }
+  authToken = null;
+  authUserId = null;
+  store.remove('tariffapp_token');
+  store.remove('tariffapp_refresh');
+}
+
+/* ---------- Profile ---------- */
+
+async function supaMyProfile() {
+  const rows = await supa('/rest/v1/profiles?select=*&id=eq.' + authUserId);
+  return rows && rows[0] ? rows[0] : null;
+}
+
+async function supaAllProfiles() {
+  return await supa('/rest/v1/profiles?select=*&order=created_at.desc');
+}
+
+async function supaUpdateProfile(id, patch) {
+  return await supa('/rest/v1/profiles?id=eq.' + id, {
+    method: 'PATCH',
+    headers: { 'Prefer': 'return=representation' },
+    body: JSON.stringify(patch)
+  });
+}
+
+/* ---------- Tariffs ---------- */
+
+async function supaTariffCount() {
+  const res = await fetch(SUPA_URL + '/rest/v1/tariffs?select=id', {
+    headers: supaHeaders({ 'Range': '0-0', 'Prefer': 'count=exact' })
+  });
+  const range = res.headers.get('content-range') || '';
+  return Number(range.split('/')[1] || 0);
+}
+
+/* Pull every tariff row, paging through in chunks because the API
+   caps a single response. */
+async function supaLoadTariffs(onProgress) {
+  const out = [];
+  const step = 1000;
+  for (let from = 0; ; from += step) {
+    const res = await fetch(SUPA_URL + '/rest/v1/tariffs?select=id,hscode,content,unit,duties&order=hscode.asc', {
+      headers: supaHeaders({ 'Range': from + '-' + (from + step - 1) })
+    });
+    if (!res.ok) throw new Error('load failed: HTTP ' + res.status);
+    const chunk = await res.json();
+    out.push(...chunk);
+    if (onProgress) onProgress(out.length);
+    if (chunk.length < step) break;
+  }
+  return out;
+}
+
+async function supaUpsertTariffs(rows) {
+  /* on_conflict=hscode means "update the row if this code already
+     exists, otherwise insert it" — exactly what the AI import and the
+     first upload both need. */
+  const step = 500;
+  for (let i = 0; i < rows.length; i += step) {
+    await supa('/rest/v1/tariffs?on_conflict=hscode', {
+      method: 'POST',
+      headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify(rows.slice(i, i + step))
+    });
+  }
+}
+
+async function supaDeleteTariff(hscode) {
+  return await supa('/rest/v1/tariffs?hscode=eq.' + encodeURIComponent(hscode), { method: 'DELETE' });
+}
+
+/* ---------- Chapters ---------- */
+
+async function supaLoadChapters() {
+  const rows = await supa('/rest/v1/chapters?select=code,title');
+  const map = {};
+  (rows || []).forEach(r => { if (r.title) map[r.code] = r.title; });
+  return map;
+}
+
+async function supaSaveChapters(map) {
+  const rows = Object.keys(map).map(code => ({ code, title: map[code] }));
+  if (!rows.length) return;
+  await supa('/rest/v1/chapters?on_conflict=code', {
+    method: 'POST',
+    headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+    body: JSON.stringify(rows)
+  });
+}
+
+/* ---------- Saved codes ---------- */
+
+async function supaLoadSaved() {
+  const rows = await supa('/rest/v1/saved_codes?select=hscode&user_id=eq.' + authUserId);
+  return (rows || []).map(r => r.hscode);
+}
+
+async function supaSaveCode(hscode) {
+  await supa('/rest/v1/saved_codes', {
+    method: 'POST',
+    headers: { 'Prefer': 'resolution=ignore-duplicates,return=minimal' },
+    body: JSON.stringify([{ user_id: authUserId, hscode }])
+  });
+}
+
+async function supaUnsaveCode(hscode) {
+  await supa('/rest/v1/saved_codes?user_id=eq.' + authUserId + '&hscode=eq.' + encodeURIComponent(hscode), { method: 'DELETE' });
+}
+
+/* ---------- Device sessions (the real cross-device enforcement) ---------- */
+
+async function supaClaimSession(kind, devId) {
+  await supa('/rest/v1/sessions?on_conflict=user_id,kind', {
+    method: 'POST',
+    headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+    body: JSON.stringify([{ user_id: authUserId, kind, device_id: devId, claimed_at: new Date().toISOString() }])
+  });
+}
+
+async function supaSessionIsMine(kind, devId) {
+  const rows = await supa('/rest/v1/sessions?select=device_id&user_id=eq.' + authUserId + '&kind=eq.' + kind);
+  if (!rows || !rows.length) return true;
+  return rows[0].device_id === devId;
+}
+
+async function supaReleaseSession(kind) {
+  await supa('/rest/v1/sessions?user_id=eq.' + authUserId + '&kind=eq.' + kind, { method: 'DELETE' });
+}
+
+/* ---------- Settings & audit ---------- */
+
+async function supaLoadBilling() {
+  const rows = await supa('/rest/v1/app_settings?select=value&key=eq.billing');
+  return rows && rows[0] ? rows[0].value : null;
+}
+
+async function supaSaveBilling(value) {
+  await supa('/rest/v1/app_settings?key=eq.billing', {
+    method: 'PATCH',
+    headers: { 'Prefer': 'return=minimal' },
+    body: JSON.stringify({ value })
+  });
+}
+
+async function supaLogAction(action, detail, email) {
+  try {
+    await supa('/rest/v1/audit_log', {
+      method: 'POST',
+      headers: { 'Prefer': 'return=minimal' },
+      body: JSON.stringify([{ user_id: authUserId, email, action, detail }])
+    });
+  } catch (e) { /* never block the app on an audit write */ }
+}
+
+async function supaLoadAudit() {
+  return await supa('/rest/v1/audit_log?select=*&order=at.desc&limit=200');
+}
+
+/* ============================================================
+   BACKEND BRIDGE
+   Connects the existing app to Supabase while keeping it usable
+   with no signal. Rules:
+     - Online: everything comes from and goes to the server.
+     - Offline: you can still sign in if you signed in on this
+       device before, and you can search the cached codes.
+       Anything that WRITES is blocked and says so plainly —
+       silently queuing edits to a tariff database would risk
+       two people overwriting each other.
+   ============================================================ */
+
+let isOnline = true;
+let offlineMode = false;
+let demoMode = false;
+
+function setOnlineBadge() {
+  const b = $('trialBanner');
+  if (!b) return;
+  if (offlineMode) {
+    b.textContent = t('offlineBanner');
+    b.classList.remove('hidden');
+  }
+}
+
+function requireOnline() {
+  if (demoMode) { toast(t('demoNoSave')); return false; }
+  if (offlineMode) { toast(t('needOnline')); return false; }
+  return true;
+}
+
+/* ---------- Data loading ---------- */
+
+async function loadFromServer() {
+  const rows = await supaLoadTariffs();
+  if (rows && rows.length) {
+    tariffData = rows.map(r => ({
+      id: r.id, hscode: r.hscode, content: r.content || '',
+      unit: r.unit || '', duties: r.duties || ''
+    }));
+    store.set('tariffapp_cache', JSON.stringify(tariffData));
+    store.set('tariffapp_cache_at', new Date().toISOString());
+  }
+  try { chapterTitles = await supaLoadChapters(); store.set('tariffapp_chapters', JSON.stringify(chapterTitles)); } catch (e) {}
+  try { const b = await supaLoadBilling(); if (b) { billing = b; store.set('tariffapp_billing', JSON.stringify(billing)); } } catch (e) {}
+  try { saved = await supaLoadSaved(); store.set('tariffapp_saved', JSON.stringify(saved)); } catch (e) {}
+}
+
+function loadFromCache() {
+  const cached = store.get('tariffapp_cache');
+  if (cached) {
+    try {
+      const rows = JSON.parse(cached);
+      if (rows && rows.length) { tariffData = rows; return true; }
+    } catch (e) {}
+  }
+  return false; /* falls back to the copy bundled in the file */
+}
+
+function cacheAge() {
+  const at = store.get('tariffapp_cache_at');
+  if (!at) return '';
+  return new Date(at).toLocaleString();
+}
+
+/* ---------- Login / signup against the server ---------- */
+
+async function doLoginServer() {
+  const email = $('email').value.trim().toLowerCase();
+  const pass = $('password').value;
+  const msg = $('loginMsg');
+  msg.style.color = '#b42318';
+  if (!email || !pass) { msg.textContent = t('loginErr'); return; }
+
+  const btn = $('loginBtn');
+  btn.disabled = true;
+  msg.style.color = '';
+  msg.textContent = t('signingIn');
+
+  try {
+    await supaSignIn(email, pass);
+    const profile = await supaMyProfile();
+    if (!profile) throw new Error('no profile');
+
+    offlineMode = false;
+    store.set('tariffapp_last_email', email);
+    store.set('tariffapp_last_name', profile.full_name || '');
+    store.set('tariffapp_last_role', profile.role);
+
+    /* Device slot check happens on the server, so a phone in one city
+       really does sign out a phone in another. */
+    const kind = deviceKind(), dev = deviceId();
+    await supaClaimSession(kind, dev);
+
+    msg.textContent = t('loadingData');
+    await loadFromServer();
+
+    msg.textContent = '';
+    openAppServer(profile);
+  } catch (err) {
+    const offlineish = /failed to fetch|networkerror|load failed/i.test(err.message || '');
+    const knownHere = store.get('tariffapp_last_email') === email;
+    if (offlineish && knownHere) {
+      offlineMode = true;
+      loadFromCache();
+      msg.textContent = '';
+      openAppServer({
+        email,
+        full_name: store.get('tariffapp_last_name') || '',
+        role: store.get('tariffapp_last_role') || 'user',
+        tier: 'free'
+      });
+    } else if (offlineish && OWNER_EMAILS.includes(email)) {
+      /* No connection at all and no prior sign-in on this device — e.g.
+         a sandboxed preview frame that blocks the network. Let the owner
+         in against the bundled copy so the interface can be reviewed,
+         and label it clearly so it is never mistaken for live data. */
+      offlineMode = true;
+      demoMode = true;
+      loadFromCache();
+      msg.textContent = '';
+      openAppServer({ email, full_name: 'Demo', role: 'admin', tier: 'free' });
+    } else if (offlineish) {
+      msg.style.color = '#b42318';
+      msg.textContent = t('offlineFirstLogin');
+    } else {
+      msg.style.color = '#b42318';
+      msg.textContent = /invalid/i.test(err.message) ? t('loginErr') : err.message;
+    }
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function doSignupServer() {
+  const name = $('suName').value.trim();
+  const email = $('suEmail').value.trim().toLowerCase();
+  const pw = $('suPass').value;
+  const pw2 = $('suPass2').value;
+  const msg = $('signupMsg');
+  msg.style.color = '#b42318';
+
+  if (!name) { msg.textContent = t('errName'); return; }
+  if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { msg.textContent = t('errEmail'); return; }
+  if (pw.length < 8) { msg.textContent = t('errShort'); return; }
+  if (pw !== pw2) { msg.textContent = t('errMatch'); return; }
+  if (!$('suTerms').checked) { msg.textContent = t('errTerms'); return; }
+
+  const btn = $('signupBtn');
+  btn.disabled = true;
+  msg.style.color = '';
+  msg.textContent = t('creatingAccount');
+  try {
+    await supaSignUp(email, pw, name);
+    msg.style.color = '#256d3f';
+    msg.textContent = t('signupOk');
+    setTimeout(() => {
+      showPanel('login');
+      $('email').value = email;
+      $('password').value = '';
+    }, 1000);
+  } catch (err) {
+    msg.style.color = '#b42318';
+    msg.textContent = /already|registered/i.test(err.message) ? t('errExists')
+      : /failed to fetch/i.test(err.message) ? t('needOnline')
+      : err.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function openAppServer(profile) {
+  currentRole = profile.role === 'admin' ? 'admin' : 'user';
+  currentEmail = profile.email;
+  currentName = profile.full_name || '';
+  currentAccess = offlineMode ? 'free' : accessForServer(profile);
+
+  if (currentRole !== 'admin' && currentAccess === 'none') { showPaywall(); return; }
+
+  currentView = 'search';
+  $('loginPage').classList.add('hidden');
+  $('paywallPage').classList.add('hidden');
+  $('app').classList.remove('hidden');
+  $('roleBadge').textContent = currentRole.toUpperCase();
+  const display = currentName || currentEmail;
+  $('profileName').textContent = display;
+  $('avatar').textContent = display.charAt(0).toUpperCase();
+  buildNav();
+  renderView('search');
+
+  const banner = $('trialBanner');
+  if (demoMode) {
+    banner.textContent = t('demoBanner');
+    banner.classList.remove('hidden');
+  } else if (offlineMode) {
+    banner.textContent = t('offlineBanner').replace('{d}', cacheAge());
+    banner.classList.remove('hidden');
+  } else if (currentAccess === 'trial') {
+    banner.textContent = t('trialLeft').replace('{n}', trialDaysLeftServer(profile));
+    banner.classList.remove('hidden');
+  } else {
+    banner.classList.add('hidden');
+  }
+
+  if (!offlineMode) startServerSessionWatch();
+}
+
+function accessForServer(p) {
+  if (p.role === 'admin') return 'owner';
+  if (p.tier === 'free') return 'free';
+  if (p.tier === 'paid') return 'paid';
+  const days = (Date.now() - new Date(p.created_at || Date.now()).getTime()) / 86400000;
+  if (days < Number(billing.trialDays || 0)) return 'trial';
+  return 'none';
+}
+
+function trialDaysLeftServer(p) {
+  const used = (Date.now() - new Date(p.created_at || Date.now()).getTime()) / 86400000;
+  return Math.max(0, Math.ceil(Number(billing.trialDays || 0) - used));
+}
+
+/* ---------- Server-backed device watch ---------- */
+
+let serverWatch = null;
+function startServerSessionWatch() {
+  stopServerSessionWatch();
+  serverWatch = setInterval(async () => {
+    if (!currentEmail || offlineMode) return;
+    try {
+      const mine = await supaSessionIsMine(deviceKind(), deviceId());
+      if (!mine) forceSignOut();
+    } catch (e) { /* a blip in signal should not sign anyone out */ }
+  }, 15000);
+}
+function stopServerSessionWatch() {
+  if (serverWatch) clearInterval(serverWatch);
+  serverWatch = null;
+}
+
+/* ---------- Admin writes go to the server ---------- */
+
+async function saveEditorServer() {
+  if (!requireOnline()) return;
+  const hs = $('fHs').value.trim(), desc = $('fDesc').value.trim();
+  const unit = $('fUnit').value.trim(), duty = $('fDuty').value.trim();
+  if (!hs) return;
+  try {
+    await supaUpsertTariffs([{ hscode: hs, content: desc, unit, duties: duty }]);
+    await supaLogAction(editingId === null ? 'add' : 'edit', hs, currentEmail);
+    await loadFromServer();
+    closeModal('editModal');
+    renderView(currentView);
+    toast('✓ ' + hs);
+  } catch (e) { toast(t('saveFailed') + ': ' + e.message); }
+}
+
+async function confirmDeleteServer() {
+  if (!requireOnline()) { closeModal('delModal'); return; }
+  const gone = tariffData.find(x => x.id === pendingDeleteId);
+  if (!gone) { closeModal('delModal'); return; }
+  try {
+    await supaDeleteTariff(gone.hscode);
+    await supaLogAction('delete', gone.hscode, currentEmail);
+    await loadFromServer();
+    closeModal('delModal');
+    renderView(currentView);
+    toast('✓ ' + gone.hscode);
+  } catch (e) { toast(t('saveFailed') + ': ' + e.message); }
+}
+
+async function quickAddServer() {
+  if (!requireOnline()) return;
+  const hs = $('qHs').value.trim();
+  if (!hs) return;
+  try {
+    await supaUpsertTariffs([{ hscode: hs, content: $('qDesc').value.trim(), unit: $('qUnit').value.trim(), duties: $('qDuty').value.trim() }]);
+    await supaLogAction('add', hs, currentEmail);
+    await loadFromServer();
+    ['qHs','qDesc','qUnit','qDuty'].forEach(id => { $(id).value = ''; });
+    $('qMsg').textContent = '✓ ' + hs;
+  } catch (e) { $('qMsg').style.color = '#b42318'; $('qMsg').textContent = e.message; }
+}
+
+async function applyProposalsServer() {
+  if (!requireOnline()) return;
+  const chosen = aiDocProposals.filter(p => p.apply);
+  if (!chosen.length) return;
+  const msg = $('applyMsg');
+  msg.style.color = '';
+  msg.textContent = t('saving');
+  try {
+    await supaUpsertTariffs(chosen.map(p => ({ hscode: p.hscode, content: p.content, unit: p.unit, duties: p.duties })));
+    await supaLogAction('aiImport', chosen.length + ' codes', currentEmail);
+    await loadFromServer();
+    msg.style.color = '#256d3f';
+    msg.textContent = '✓ ' + chosen.length;
+    aiDocProposals = [];
+    setTimeout(() => { $('aiDocResults').innerHTML = ''; $('aiDocStatus').textContent = ''; }, 2000);
+  } catch (e) { msg.style.color = '#b42318'; msg.textContent = e.message; }
+}
+
+async function saveAllChapterTitlesServer() {
+  if (!requireOnline()) return;
+  document.querySelectorAll('[data-chapter-input]').forEach(inp => {
+    const v = String(inp.value || '').trim();
+    const ch = inp.getAttribute('data-chapter-input');
+    if (v) chapterTitles[ch] = v; else delete chapterTitles[ch];
+  });
+  const m = $('chTitleMsg');
+  try {
+    await supaSaveChapters(chapterTitles);
+    await supaLogAction('chapters', Object.keys(chapterTitles).length + ' titles', currentEmail);
+    store.set('tariffapp_chapters', JSON.stringify(chapterTitles));
+    m.style.color = '#256d3f'; m.textContent = '✓ ' + t('btnSave');
+  } catch (e) { m.style.color = '#b42318'; m.textContent = e.message; }
+}
+
+async function toggleSaveServer(code) {
+  code = String(code);
+  noteRecent(code);
+  const had = saved.includes(code);
+  saved = had ? saved.filter(x => x !== code) : [...saved, code];
+  store.set('tariffapp_saved', JSON.stringify(saved));
+  if (currentView === 'search') { const i = $('searchInput'); if (i) search(i.value); }
+  else renderView(currentView);
+  if (!offlineMode) {
+    try { had ? await supaUnsaveCode(code) : await supaSaveCode(code); } catch (e) { /* local copy still updated */ }
+  }
+}
+
+async function saveBillingServer() {
+  if (!requireOnline()) return;
+  billing.price = $('bPrice').value.trim() || '0';
+  billing.currency = ($('bCur').value.trim() || 'USD').toUpperCase();
+  billing.period = $('bPeriod').value.trim() || 'month';
+  billing.trialDays = $('bTrial').value.trim() || '0';
+  try {
+    await supaSaveBilling(billing);
+    store.set('tariffapp_billing', JSON.stringify(billing));
+    $('bMsg').style.color = '#256d3f'; $('bMsg').textContent = '✓ ' + t('btnSave');
+  } catch (e) { $('bMsg').style.color = '#b42318'; $('bMsg').textContent = e.message; }
+}
+
+async function setTierServer(email, tier, action) {
+  if (!requireOnline()) return;
+  try {
+    const all = await supaAllProfiles();
+    const p = all.find(x => x.email === email);
+    if (!p) { toast(t('userNotFound')); return; }
+    const res = await supaUpdateProfile(p.id, { tier });
+    /* PATCH returns the updated rows; an empty array means the database
+       accepted the request but changed nothing (usually a security rule),
+       which must not look like success. */
+    if (!res || !res.length) { toast(t('changeRefused')); return; }
+    await supaLogAction(action, email, currentEmail);
+    toast('✓ ' + email);
+    openSettings('people');
+  } catch (e) {
+    toast(t('saveFailed') + ': ' + e.message);
+  }
+}
+
+async function grantFreeServer(email) {
+  await setTierServer(email, 'free', 'grantFree');
+}
+
+async function togglePaidServer(email) {
+  if (!requireOnline()) return;
+  try {
+    const all = await supaAllProfiles();
+    const p = all.find(x => x.email === email);
+    if (!p) { toast(t('userNotFound')); return; }
+    const next = p.tier === 'paid' ? 'none' : 'paid';
+    await setTierServer(email, next, next === 'paid' ? 'markPaid' : 'markUnpaid');
+  } catch (e) {
+    toast(t('saveFailed') + ': ' + e.message);
+  }
+}
+
+/* People and Activity tabs read live from the server. */
+async function renderPeopleServer() {
+  const box = $('setBody');
+  box.innerHTML = `<div class="result-card"><h3 class="set-h">${esc(t('tUsers'))}</h3>
+    <p class="set-note" style="margin-top:0">${esc(t('loadingData'))}</p></div>`;
+  try {
+    const rows = await supaAllProfiles();
+    box.innerHTML = `<div class="stats">
+        <div class="stat"><small>${esc(t('registered'))}</small><strong>${rows.length}</strong></div>
+        <div class="stat"><small>${esc(t('paidUsers'))}</small><strong>${rows.filter(r => r.tier === 'paid').length}</strong></div>
+        <div class="stat"><small>${esc(t('freeUsers'))}</small><strong>${rows.filter(r => r.tier === 'free' || r.role === 'admin').length}</strong></div>
+      </div>
+      ${rows.map(r => `<div class="admin-row">
+        <div><strong>${esc(r.full_name || r.email)}</strong>
+          <div class="meta">${esc(r.email)} • ${esc(new Date(r.created_at).toLocaleDateString())}</div>
+          <div class="meta"><span class="pill ${r.tier === 'none' ? 'paid' : 'free'}">${esc(r.role === 'admin' ? t('ownerTag') : t('tier_' + r.tier))}</span></div>
+        </div>
+        ${r.role === 'admin' ? '' : `<div class="admin-actions">
+          <button onclick="grantFreeServer('${esc(r.email)}')">${esc(t('grantFree'))}</button>
+          <button onclick="togglePaidServer('${esc(r.email)}')">${esc(r.tier === 'paid' ? t('markUnpaid') : t('markPaid'))}</button>
+        </div>`}
+      </div>`).join('')}`;
+  } catch (e) {
+    box.innerHTML = `<div class="result-card"><p style="color:#b42318">${esc(e.message)}</p></div>`;
+  }
+}
+
+async function renderAuditServer() {
+  const box = $('setBody');
+  box.innerHTML = `<div class="result-card"><p class="set-note">${esc(t('loadingData'))}</p></div>`;
+  try {
+    const rows = await supaLoadAudit();
+    box.innerHTML = `<div class="result-card"><h3 class="set-h">${esc(t('tAudit'))}</h3>
+      ${rows.length ? rows.map(a => `<div style="padding:12px 0;border-bottom:1px solid #eef1f4;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap">
+        <span><b>${esc(t('act_' + a.action) || a.action)}</b> — ${esc(a.detail || '')}</span>
+        <span style="color:var(--muted);font-size:12.5px">${esc(a.email || '')} • ${esc(new Date(a.at).toLocaleString())}</span>
+      </div>`).join('') : `<div class="empty">${esc(t('noAudit'))}</div>`}</div>`;
+  } catch (e) {
+    box.innerHTML = `<div class="result-card"><p style="color:#b42318">${esc(e.message)}</p></div>`;
+  }
+}
+
+/* ---------- Replace the local handlers with the server ones ---------- */
+
+function wireBackend() {
+  /* Replace the buttons with clones: that drops every listener the
+     local version attached, without relying on removeEventListener
+     matching the exact function reference. */
+  function rebind(id, handler) {
+    const old = $(id);
+    if (!old) return;
+    const fresh = old.cloneNode ? old.cloneNode(true) : null;
+    if (fresh && old.parentNode) {
+      old.parentNode.replaceChild(fresh, old);
+      fresh.addEventListener('click', handler);
+    } else {
+      old.addEventListener('click', handler);
+    }
+  }
+  rebind('loginBtn', doLoginServer);
+  rebind('signupBtn', doSignupServer);
+  rebind('forgotLink', doForgotServer);
+  rebind('resetBtn', doSetNewPassword);
+  const toLoginFromReset = $('backToLoginFromReset');
+  if (toLoginFromReset) toLoginFromReset.addEventListener('click', () => {
+    $('resetPanel').classList.add('hidden');
+    $('loginPanel').classList.remove('hidden');
+  });
+  ['rsPass', 'rsPass2'].forEach(id => {
+    const el = $(id);
+    if (el) el.addEventListener('keydown', e => { if (e.key === 'Enter') doSetNewPassword(); });
+  });
+  ['email', 'password'].forEach(id => {
+    const el = $(id);
+    if (el) el.addEventListener('keydown', e => { if (e.key === 'Enter') doLoginServer(); });
+  });
+
+  window.toggleSave = toggleSaveServer;
+  window.saveEditor = saveEditorServer;
+  window.confirmDelete = confirmDeleteServer;
+  window.quickAdd = quickAddServer;
+  window.applyProposals = applyProposalsServer;
+  window.saveAllChapterTitles = saveAllChapterTitlesServer;
+  window.saveBilling = saveBillingServer;
+  window.grantFreeServer = grantFreeServer;
+  window.togglePaidServer = togglePaidServer;
+
+  /* People and Activity now come from the server. */
+  const origRender = renderSettingsBody;
+  renderSettingsBody = function () {
+    if (demoMode && (settingsTab === 'people' || settingsTab === 'activity')) {
+      $('setBody').innerHTML = '<div class="result-card"><h3 class="set-h">' +
+        esc(t(settingsTab === 'people' ? 'tUsers' : 'tAudit')) + '</h3><p class="set-note" style="margin-top:0">' +
+        esc(t('demoNeedsServer')) + '</p></div>';
+      return;
+    }
+    if (settingsTab === 'people' && !offlineMode) return renderPeopleServer();
+    if (settingsTab === 'activity' && !offlineMode) return renderAuditServer();
+    return origRender();
+  };
+
+  /* Sign out clears the server session too. */
+  rebind('logout', async () => {
+    stopServerSessionWatch();
+    if (!offlineMode) {
+      try { await supaReleaseSession(deviceKind()); } catch (e) {}
+      try { await supaSignOut(); } catch (e) {}
+    }
+    currentEmail = ''; currentName = '';
+    $('app').classList.add('hidden');
+    $('loginPage').classList.remove('hidden');
+    $('password').value = '';
+  });
+
+  /* Start from the cached copy so search works instantly, even before
+     the first server response arrives. */
+  loadFromCache();
+
+  /* If the user arrived from a password-reset email, show that panel;
+     otherwise rebuild the signed-in session properly. */
+  if (!checkRecoveryLink()) restoreSession();
+
+  window.addEventListener('online', () => { isOnline = true; });
+  window.addEventListener('offline', () => { isOnline = false; });
+}
+
+
+/* ---------- Pre-approved emails (invites) ---------- */
+
+async function supaListInvites() {
+  return await supa('/rest/v1/invites?select=*&order=created_at.desc');
+}
+async function supaAddInvite(email, makeAdmin) {
+  await supa('/rest/v1/invites?on_conflict=email', {
+    method: 'POST',
+    headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+    body: JSON.stringify([{ email: email.toLowerCase(), tier: 'free', make_admin: !!makeAdmin, invited_by: currentEmail }])
+  });
+}
+async function supaRemoveInvite(email) {
+  await supa('/rest/v1/invites?email=eq.' + encodeURIComponent(email), { method: 'DELETE' });
+}
+
+async function addInviteUI() {
+  if (!requireOnline()) return;
+  const inp = $('inviteEmail');
+  const msg = $('inviteMsg');
+  const email = (inp.value || '').trim().toLowerCase();
+  msg.style.color = '#b42318';
+  if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { msg.textContent = t('errEmail'); return; }
+  try {
+    await supaAddInvite(email, $('inviteAdmin').checked);
+    await supaLogAction('invite', email + ($('inviteAdmin').checked ? ' (admin)' : ''), currentEmail);
+    inp.value = '';
+    $('inviteAdmin').checked = false;
+    msg.style.color = '#256d3f';
+    msg.textContent = '✓ ' + email;
+    renderPeopleServer();
+  } catch (e) { msg.textContent = e.message; }
+}
+
+async function removeInviteUI(email) {
+  if (!requireOnline()) return;
+  try { await supaRemoveInvite(email); renderPeopleServer(); } catch (e) { toast(e.message); }
+}
+
+/* ---------- Make / remove admin ---------- */
+
+let pendingPromote = null;
+function askPromote(email, makeAdmin) {
+  pendingPromote = { email, makeAdmin };
+  $('promoteTitle').textContent = makeAdmin ? t('makeAdminTitle') : t('removeAdminTitle');
+  $('promoteBody').textContent = (makeAdmin ? t('makeAdminWarn') : t('removeAdminWarn')).replace('{e}', email);
+  $('promoteModal').classList.add('open');
+}
+
+async function confirmPromote() {
+  if (!pendingPromote) return;
+  const { email, makeAdmin } = pendingPromote;
+  pendingPromote = null;
+  closeModal('promoteModal');
+  if (!requireOnline()) return;
+  try {
+    const all = await supaAllProfiles();
+    const p = all.find(x => x.email === email);
+    if (!p) return;
+    await supaUpdateProfile(p.id, { role: makeAdmin ? 'admin' : 'user' });
+    await supaLogAction(makeAdmin ? 'makeAdmin' : 'removeAdmin', email, currentEmail);
+    toast('✓ ' + email);
+    renderPeopleServer();
+  } catch (e) {
+    /* The database refuses to demote the owner — surface that plainly. */
+    toast(/owner/i.test(e.message) ? t('cantDemoteOwner') : e.message);
+  }
+}
+
+/* ---------- People tab, with invites and admin controls ---------- */
+
+async function renderPeopleServer() {
+  const box = $('setBody');
+  box.innerHTML = `<div class="result-card"><p class="set-note">${esc(t('loadingData'))}</p></div>`;
+  try {
+    const [rows, invites] = await Promise.all([supaAllProfiles(), supaListInvites().catch(() => [])]);
+    const pending = (invites || []).filter(i => !i.used_at);
+
+    box.innerHTML = `
+    <div class="result-card">
+      <h3 class="set-h">${esc(t('inviteTitle'))}</h3>
+      <p class="set-note" style="margin-top:0">${esc(t('inviteNote'))}</p>
+      <div style="display:flex;gap:10px;margin:14px 0;flex-wrap:wrap">
+        <input id="inviteEmail" class="search-input" style="flex:1;min-width:200px;height:48px;font-size:15px" placeholder="${esc(t('addEmailPh'))}">
+        <button class="btn" onclick="addInviteUI()">${esc(t('addEmail'))}</button>
+      </div>
+      <label class="set-row" style="border:0;padding:4px 0">
+        <span>${esc(t('inviteAsAdmin'))}</span>
+        <input type="checkbox" id="inviteAdmin">
+      </label>
+      <div id="inviteMsg" class="set-msg"></div>
+      ${pending.length ? `<div style="margin-top:10px">${pending.map(i => `
+        <div class="admin-row" style="margin:8px 0">
+          <div><strong>${esc(i.email)}</strong>
+            <div class="meta"><span class="pill free">${esc(i.make_admin ? t('willBeAdmin') : t('willBeFree'))}</span> ${esc(t('notSignedUpYet'))}</div>
+          </div>
+          <div class="admin-actions"><button class="del" onclick="removeInviteUI('${esc(i.email)}')">${esc(t('remove'))}</button></div>
+        </div>`).join('')}</div>` : ''}
+    </div>
+
+    <div class="stats">
+      <div class="stat"><small>${esc(t('registered'))}</small><strong>${rows.length}</strong></div>
+      <div class="stat"><small>${esc(t('paidUsers'))}</small><strong>${rows.filter(r => r.tier === 'paid').length}</strong></div>
+      <div class="stat"><small>${esc(t('freeUsers'))}</small><strong>${rows.filter(r => r.tier === 'free' || r.role === 'admin').length}</strong></div>
+    </div>
+
+    <h3 style="margin:20px 0 8px;font-size:16px">${esc(t('registeredUsers'))}</h3>
+    ${rows.length ? rows.map(r => {
+      const isOwner = r.email === OWNER_EMAILS[0];
+      const isAdmin = r.role === 'admin';
+      return `<div class="admin-row">
+        <div><strong>${esc(r.full_name || r.email)}</strong>
+          <div class="meta">${esc(r.email)} • ${esc(new Date(r.created_at).toLocaleDateString())}</div>
+          <div class="meta">
+            <span class="pill ${r.tier === 'none' ? 'paid' : 'free'}">${esc(t('tier_' + r.tier) || r.tier)}</span>
+            ${isAdmin ? `<span class="pill free" style="margin-inline-start:6px">${esc(isOwner ? t('ownerTag') : t('adminTag'))}</span>` : ''}
+            ${r.disabled ? `<span class="pill paid" style="margin-inline-start:6px">${esc(t('disabledTag'))}</span>` : ''}
+            ${r.delete_at ? `<span class="pill paid" style="margin-inline-start:6px">${esc(t('scheduledTag'))}</span>` : ''}
+          </div>
+        </div>
+        ${isOwner ? '' : `<div class="admin-actions">
+          ${r.tier === 'free' ? '' : `<button onclick="grantFreeServer('${esc(r.email)}')">${esc(t('grantFree'))}</button>`}
+          <button onclick="togglePaidServer('${esc(r.email)}')">${esc(r.tier === 'paid' ? t('markUnpaid') : t('markPaid'))}</button>
+          <button onclick="askPromote('${esc(r.email)}', ${isAdmin ? 'false' : 'true'})">${esc(isAdmin ? t('removeAdmin') : t('makeAdmin'))}</button>
+          <button class="del" onclick="askAccountAction('${esc(r.email)}')">${esc(t('manage'))}</button>
+        </div>`}
+      </div>`;
+    }).join('') : `<div class="empty">${esc(t('noRegistered'))}</div>`}`;
+  } catch (e) {
+    box.innerHTML = `<div class="result-card"><p style="color:#b42318">${esc(e.message)}</p></div>`;
+  }
+}
+
+window.addInviteUI = addInviteUI; window.removeInviteUI = removeInviteUI;
+window.askPromote = askPromote; window.confirmPromote = confirmPromote;
+
+/* ---------- Password reset ----------
+   Supabase emails a link back to the app carrying a recovery token in
+   the URL fragment. We detect that on load and show a "set a new
+   password" panel instead of the normal login. */
+
+async function supaRequestReset(email) {
+  await supa('/auth/v1/recover', {
+    method: 'POST',
+    body: JSON.stringify({ email, redirect_to: location.origin + location.pathname })
+  });
+}
+
+async function supaSetPassword(newPassword, token) {
+  const res = await fetch(SUPA_URL + '/auth/v1/user', {
+    method: 'PUT',
+    headers: { 'apikey': SUPA_KEY, 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+    body: JSON.stringify({ password: newPassword })
+  });
+  const text = await res.text();
+  let body = null;
+  if (text) { try { body = JSON.parse(text); } catch (e) {} }
+  if (!res.ok) throw new Error((body && (body.msg || body.message)) || ('HTTP ' + res.status));
+  return body;
+}
+
+async function doForgotServer() {
+  const email = $('email').value.trim().toLowerCase();
+  const msg = $('loginMsg');
+  if (!email) { msg.style.color = '#b42318'; msg.textContent = t('forgotNeedEmail'); return; }
+  msg.style.color = '';
+  msg.textContent = t('sendingReset');
+  try {
+    await supaRequestReset(email);
+    msg.style.color = '#256d3f';
+    /* Deliberately the same message whether or not the address exists,
+       so this cannot be used to discover who has an account. */
+    msg.textContent = t('resetSent').replace('{e}', email);
+  } catch (e) {
+    msg.style.color = '#b42318';
+    msg.textContent = /failed to fetch/i.test(e.message) ? t('needOnline') : e.message;
+  }
+}
+
+let recoveryToken = null;
+
+function checkRecoveryLink() {
+  const hash = location.hash || '';
+  if (!/type=recovery/.test(hash)) return false;
+  const params = new URLSearchParams(hash.replace(/^#/, ''));
+  recoveryToken = params.get('access_token');
+  if (!recoveryToken) return false;
+  /* Clear the token out of the address bar so it is not left in history. */
+  try {
+    if (typeof history !== 'undefined' && history.replaceState) {
+      history.replaceState(null, '', location.pathname + location.search);
+    }
+  } catch (e) { /* not critical */ }
+  showResetPanel();
+  return true;
+}
+
+function showResetPanel() {
+  $('loginPanel').classList.add('hidden');
+  $('signupPanel').classList.add('hidden');
+  $('resetPanel').classList.remove('hidden');
+  $('loginPage').classList.remove('hidden');
+  $('app').classList.add('hidden');
+  $('paywallPage').classList.add('hidden');
+}
+
+async function doSetNewPassword() {
+  const pw = $('rsPass').value;
+  const pw2 = $('rsPass2').value;
+  const msg = $('resetMsg');
+  msg.style.color = '#b42318';
+  if (pw.length < 8) { msg.textContent = t('errShort'); return; }
+  if (pw !== pw2) { msg.textContent = t('errMatch'); return; }
+  if (!recoveryToken) { msg.textContent = t('resetExpired'); return; }
+  const btn = $('resetBtn');
+  btn.disabled = true;
+  msg.style.color = '';
+  msg.textContent = t('saving');
+  try {
+    await supaSetPassword(pw, recoveryToken);
+    recoveryToken = null;
+    msg.style.color = '#256d3f';
+    msg.textContent = t('resetDone');
+    setTimeout(() => {
+      $('resetPanel').classList.add('hidden');
+      $('loginPanel').classList.remove('hidden');
+      $('password').value = '';
+      $('loginMsg').textContent = '';
+    }, 1400);
+  } catch (e) {
+    msg.style.color = '#b42318';
+    msg.textContent = /expired|invalid/i.test(e.message) ? t('resetExpired') : e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+window.doSetNewPassword = doSetNewPassword;
+
+
+/* ---------- Disabling and deleting accounts ----------
+   Three states, deliberately separate:
+     disable  - they cannot log in; their data is kept
+     schedule - removed automatically once their paid period ends
+     remove   - profile and data deleted now
+   Removing the login credentials themselves needs the secret key, so
+   that step happens in the Supabase dashboard or a server function;
+   the app says so rather than pretending otherwise. */
+
+let pendingAccount = null;
+
+function daysLeftPaid(p) {
+  if (!p || !p.paid_until) return 0;
+  const d = (new Date(p.paid_until).getTime() - Date.now()) / 86400000;
+  return d > 0 ? Math.ceil(d) : 0;
+}
+
+async function askAccountAction(email) {
+  if (!requireOnline()) return;
+  try {
+    const all = await supaAllProfiles();
+    const p = all.find(x => x.email === email);
+    if (!p) { toast(t('userNotFound')); return; }
+    pendingAccount = p;
+
+    const paidDays = daysLeftPaid(p);
+    const isPaid = p.tier === 'paid';
+
+    $('acctTitle').textContent = t('manageAccount');
+    $('acctWho').textContent = (p.full_name || '') + ' — ' + p.email;
+
+    let warn = '';
+    if (isPaid && paidDays > 0) {
+      warn = `<div class="notice" style="background:#fdeceb;border-color:#f3bdb8;color:#8a2b21">
+        <b>${esc(t('stillPaidTitle'))}</b><br>${esc(t('stillPaidBody').replace('{n}', paidDays))}</div>`;
+    } else if (isPaid) {
+      warn = `<div class="notice">${esc(t('paidNoEnd'))}</div>`;
+    }
+
+    $('acctBody').innerHTML = warn + `
+      <div class="set-row"><span>${esc(t('statusWord'))}</span>
+        <span class="pill ${p.disabled ? 'paid' : 'free'}">${esc(p.disabled ? t('disabledTag') : t('activeTag'))}</span></div>
+      ${p.delete_at ? `<div class="set-row"><span>${esc(t('scheduledFor'))}</span>
+        <span style="color:var(--muted)">${esc(new Date(p.delete_at).toLocaleDateString())}</span></div>` : ''}
+      <div class="btn-row" style="margin-top:18px;flex-direction:column">
+        ${p.disabled
+          ? `<button class="btn secondary" onclick="setDisabled(false)">${esc(t('enableAccount'))}</button>`
+          : `<button class="btn secondary" onclick="setDisabled(true)">${esc(t('disableAccount'))}</button>`}
+        ${isPaid && paidDays > 0
+          ? `<button class="btn secondary" onclick="scheduleDeletion()">${esc(t('deleteAtPeriodEnd').replace('{n}', paidDays))}</button>`
+          : ''}
+        ${p.delete_at ? `<button class="btn secondary" onclick="cancelDeletion()">${esc(t('cancelScheduled'))}</button>` : ''}
+        <button class="btn danger" onclick="removeAccountNow()">${esc(t('removeNow'))}</button>
+      </div>
+      <p class="set-note">${esc(t('removeNote'))}</p>
+      <div id="acctMsg" class="set-msg"></div>`;
+    $('acctModal').classList.add('open');
+  } catch (e) { toast(e.message); }
+}
+
+async function setDisabled(state) {
+  if (!pendingAccount) return;
+  const msg = $('acctMsg');
+  msg.style.color = '';
+  msg.textContent = t('saving');
+  try {
+    const res = await supaUpdateProfile(pendingAccount.id, {
+      disabled: state,
+      disabled_reason: state ? ('by ' + currentEmail) : null
+    });
+    if (!res || !res.length) { msg.style.color = '#b42318'; msg.textContent = t('changeRefused'); return; }
+    await supaLogAction(state ? 'disable' : 'enable', pendingAccount.email, currentEmail);
+    closeModal('acctModal');
+    toast('✓ ' + pendingAccount.email);
+    openSettings('people');
+  } catch (e) {
+    msg.style.color = '#b42318';
+    msg.textContent = /owner/i.test(e.message) ? t('cantDemoteOwner') : e.message;
+  }
+}
+
+async function scheduleDeletion() {
+  if (!pendingAccount) return;
+  const msg = $('acctMsg');
+  msg.style.color = '';
+  msg.textContent = t('saving');
+  try {
+    /* Disabled straight away so they lose access, but the record is kept
+       until the period they paid for has run out. */
+    const res = await supaUpdateProfile(pendingAccount.id, {
+      delete_at: pendingAccount.paid_until,
+      disabled: true,
+      disabled_reason: 'scheduled by ' + currentEmail
+    });
+    if (!res || !res.length) { msg.style.color = '#b42318'; msg.textContent = t('changeRefused'); return; }
+    await supaLogAction('scheduleDelete', pendingAccount.email, currentEmail);
+    closeModal('acctModal');
+    toast('✓ ' + t('scheduled'));
+    openSettings('people');
+  } catch (e) { msg.style.color = '#b42318'; msg.textContent = e.message; }
+}
+
+async function cancelDeletion() {
+  if (!pendingAccount) return;
+  try {
+    await supaUpdateProfile(pendingAccount.id, { delete_at: null, disabled: false, disabled_reason: null });
+    await supaLogAction('cancelDelete', pendingAccount.email, currentEmail);
+    closeModal('acctModal');
+    openSettings('people');
+  } catch (e) { toast(e.message); }
+}
+
+async function removeAccountNow() {
+  if (!pendingAccount) return;
+  const p = pendingAccount;
+  const paidDays = daysLeftPaid(p);
+  const msg = $('acctMsg');
+  if (paidDays > 0 && !confirmedRemoval) {
+    confirmedRemoval = true;
+    msg.style.color = '#b42318';
+    msg.textContent = t('confirmPaidRemoval').replace('{n}', paidDays);
+    return;
+  }
+  confirmedRemoval = false;
+  msg.style.color = '';
+  msg.textContent = t('saving');
+  try {
+    await supa('/rest/v1/saved_codes?user_id=eq.' + p.id, { method: 'DELETE' });
+    await supa('/rest/v1/sessions?user_id=eq.' + p.id, { method: 'DELETE' });
+
+    /* Ask for the deleted rows back. A security rule or a trigger can
+       cancel a delete without raising an error, and an empty result is
+       the only way to tell that apart from success. */
+    const gone = await supa('/rest/v1/profiles?id=eq.' + p.id, {
+      method: 'DELETE',
+      headers: { 'Prefer': 'return=representation' }
+    });
+    if (!gone || !gone.length) {
+      msg.style.color = '#b42318';
+      msg.textContent = t('deleteBlocked');
+      return;
+    }
+
+    await supaLogAction('removeAccount', p.email, currentEmail);
+    closeModal('acctModal');
+    toast('✓ ' + p.email);
+    openSettings('people');
+  } catch (e) {
+    msg.style.color = '#b42318';
+    msg.textContent = /owner/i.test(e.message) ? t('cantDemoteOwner') : e.message;
+  }
+}
+
+let confirmedRemoval = false;
+
+window.askAccountAction = askAccountAction; window.setDisabled = setDisabled;
+window.scheduleDeletion = scheduleDeletion; window.cancelDeletion = cancelDeletion;
+window.removeAccountNow = removeAccountNow;
+
+
+/* ---------- Restoring a session on reload ----------
+   The access token lives in a variable, so a page refresh loses it.
+   The app must not look signed in without one: every request would go
+   out anonymously and the server would refuse it, which looks like the
+   app is broken rather than logged out. So on startup we exchange the
+   stored refresh token for a fresh access token, and only then open
+   the app. If that fails, we show the login screen. */
+
+async function restoreSession() {
+  /* Undo the local auto-login that ran before the backend loaded. */
+  $('app').classList.add('hidden');
+  $('paywallPage').classList.add('hidden');
+  stopSessionWatch();
+
+  const refresh = store.get('tariffapp_refresh');
+  if (!refresh) { $('loginPage').classList.remove('hidden'); return; }
+
+  const msg = $('loginMsg');
+  msg.style.color = '';
+  msg.textContent = t('signingIn');
+  $('loginPage').classList.remove('hidden');
+
+  try {
+    const data = await supaRefresh();
+    if (!data || !authToken) throw new Error('no session');
+
+    const profile = await supaMyProfile();
+    if (!profile) throw new Error('no profile');
+
+    offlineMode = false;
+    await supaClaimSession(deviceKind(), deviceId());
+    await loadFromServer();
+    msg.textContent = '';
+    openAppServer(profile);
+  } catch (e) {
+    /* Offline but previously signed in here: cached, read-only. */
+    if (/failed to fetch|networkerror|load failed/i.test(e.message || '') && store.get('tariffapp_last_email')) {
+      offlineMode = true;
+      loadFromCache();
+      msg.textContent = '';
+      openAppServer({
+        email: store.get('tariffapp_last_email'),
+        full_name: store.get('tariffapp_last_name') || '',
+        role: store.get('tariffapp_last_role') || 'user',
+        tier: 'free'
+      });
+      return;
+    }
+    /* Anything else means the stored session is no longer good. */
+    store.remove('tariffapp_token');
+    store.remove('tariffapp_refresh');
+    store.remove('tariffapp_role');
+    msg.textContent = '';
+    $('loginPage').classList.remove('hidden');
+  }
+}
+
+/* Boot last: everything above must be declared before this runs. */
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', wireBackend);
+} else {
+  wireBackend();
+}
+
 </script>
 </body>
 </html>
