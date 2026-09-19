@@ -26025,10 +26025,11 @@ function doLogin() {
 
 // A plain button click, not a form submit: sandboxed preview frames block
 // form submission, so the submit event would never fire there.
-$('loginBtn').addEventListener('click', doLogin);
-['email', 'password'].forEach(id => {
-  $(id).addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
-});
+/* The offline login is deliberately NOT bound here. The backend version
+   binds itself in wireBackend(). Binding both meant two handlers ran on
+   every click: the offline one let any owner email in with any password,
+   then the server one failed and reset the screen - which looked like
+   the button doing nothing at all. */
 
 $('logout').addEventListener('click', () => {
   releaseSession(currentEmail);
@@ -26054,7 +26055,7 @@ $('overlay').addEventListener('click', () => {
 $('pwToggle').addEventListener('click', togglePassword);
 $('toSignup').addEventListener('click', () => showPanel('signup'));
 $('toLogin').addEventListener('click', () => showPanel('login'));
-$('signupBtn').addEventListener('click', doSignup);
+/* offline signup not bound; the backend binds it */
 $('suPass').addEventListener('input', updateStrength);
 ['suPwToggle','suPw2Toggle'].forEach((btnId, i) => {
   const fieldId = i === 0 ? 'suPass' : 'suPass2';
@@ -26427,8 +26428,8 @@ function tariffExtra() {
    changes. NOTHING is written to the database until the admin approves
    each row: this is official data, so a silent bad edit is unacceptable. */
 
-let aiDocProposals = [];
-let aiDocBusy = false;
+var aiDocProposals = [];
+var aiDocBusy = false;
 
 function fileToBase64(file) {
   return new Promise((resolve, reject) => {
@@ -26703,7 +26704,7 @@ async function shareTariff(code) {
   copyTariff(code);
 }
 
-let toastTimer = null;
+var toastTimer = null;
 function toast(msg) {
   let el = $('toast');
   if (!el) {
@@ -26811,7 +26812,7 @@ function releaseSession(email) {
 
 /* Poll for takeover. With a backend this becomes a realtime subscription
    instead, so the sign-out is instant rather than within a few seconds. */
-let sessionTimer = null;
+var sessionTimer = null;
 function startSessionWatch() {
   stopSessionWatch();
   sessionTimer = setInterval(() => {
@@ -26905,8 +26906,8 @@ window.deviceKind = deviceKind;
 const SUPA_URL = 'https://lnikyqqexjazaavaopyq.supabase.co';
 const SUPA_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxuaWt5cXFleGphemFhdmFvcHlxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkzMTM2ODUsImV4cCI6MjEwNDg4OTY4NX0.PsKdpcbvDso5Or9y_QINH8AmMDgSrTAJt_8FJBRGXcg';
 
-let authToken = null;      // set after sign-in
-let authUserId = null;
+var authToken = null;      // set after sign-in
+var authUserId = null;
 
 /* Sends the user back to the login screen with an explanation. Defined
    here because supa() calls it, and it must never throw. */
@@ -27205,9 +27206,9 @@ async function supaLoadAudit() {
        two people overwriting each other.
    ============================================================ */
 
-let isOnline = true;
-let offlineMode = false;
-let demoMode = false;
+var isOnline = true;
+var offlineMode = false;
+var demoMode = false;
 
 function setOnlineBadge() {
   const b = $('trialBanner');
@@ -27416,7 +27417,7 @@ function trialDaysLeftServer(p) {
 
 /* ---------- Server-backed device watch ---------- */
 
-let serverWatch = null;
+var serverWatch = null;
 function startServerSessionWatch() {
   stopServerSessionWatch();
   serverWatch = setInterval(async () => {
@@ -27621,15 +27622,9 @@ function wireBackend() {
      local version attached, without relying on removeEventListener
      matching the exact function reference. */
   function rebind(id, handler) {
-    const old = $(id);
-    if (!old) return;
-    const fresh = old.cloneNode ? old.cloneNode(true) : null;
-    if (fresh && old.parentNode) {
-      old.parentNode.replaceChild(fresh, old);
-      fresh.addEventListener('click', handler);
-    } else {
-      old.addEventListener('click', handler);
-    }
+    const el = $(id);
+    if (!el) return;
+    el.addEventListener('click', handler);
   }
   rebind('loginBtn', doLoginServer);
   rebind('signupBtn', doSignupServer);
@@ -27740,7 +27735,7 @@ async function removeInviteUI(email) {
 
 /* ---------- Make / remove admin ---------- */
 
-let pendingPromote = null;
+var pendingPromote = null;
 function askPromote(email, makeAdmin) {
   pendingPromote = { email, makeAdmin };
   $('promoteTitle').textContent = makeAdmin ? t('makeAdminTitle') : t('removeAdminTitle');
@@ -27878,7 +27873,7 @@ async function doForgotServer() {
   }
 }
 
-let recoveryToken = null;
+var recoveryToken = null;
 
 function checkRecoveryLink() {
   const hash = location.hash || '';
@@ -27948,7 +27943,7 @@ window.doSetNewPassword = doSetNewPassword;
    that step happens in the Supabase dashboard or a server function;
    the app says so rather than pretending otherwise. */
 
-let pendingAccount = null;
+var pendingAccount = null;
 
 function daysLeftPaid(p) {
   if (!p || !p.paid_until) return 0;
@@ -28092,7 +28087,7 @@ async function removeAccountNow() {
   }
 }
 
-let confirmedRemoval = false;
+var confirmedRemoval = false;
 
 window.askAccountAction = askAccountAction; window.setDisabled = setDisabled;
 window.scheduleDeletion = scheduleDeletion; window.cancelDeletion = cancelDeletion;
